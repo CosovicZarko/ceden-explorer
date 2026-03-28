@@ -13,5 +13,5 @@ CEDEN Explorer allows efficient analysis of a 5GB environmental health dataset. 
 
 This tool was developed to improve team productivity and replace manual query workflows.
 
-**Technologies:** Python, FastAPI, BigQuery, Google Cloud Storage, JavaScript, Docker
-**Live App:** https://ceden-app-717905783428.us-central1.run.app/ 
+**Technologies:** Python, FastAPI, BigQuery, Google Cloud Storage, JavaScript, Docker  
+**Live App:** https://ceden-app-717905783428.us-central1.run.app/
