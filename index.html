@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>CEDEN Map - Polygon & Multi-Select</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
+<style>
+body { margin: 0; font-family: sans-serif; }
+#map { height: 600px; width: 100%; }
+#panels-container { display: flex; flex-direction: column; gap: 10px; padding: 10px; background: #f9f9f9; }
+.panel { padding: 10px; border: 1px solid #ccc; background: #fff; }
+#download-container { padding: 10px; text-align: center; background: #fafafa; }
+#station-data { padding: 10px; font-family: monospace; overflow-x: auto; width: 100%; max-height: 300px; overflow-y: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th, td { border: 1px solid #ccc; padding: 2px 4px; text-align: left; }
+th { background-color: #eee; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="panels-container">
+
+  <div id="top-panel" class="panel">
+    <strong>Selected Stations:</strong>
+    <div id="selected-stations" style="white-space: pre-wrap; min-height: 20px;">
+      Click markers or draw a polygon to select stations...
+    </div>
+    <button id="clear-selection" style="margin-top:6px;">Clear All Selections</button>
+  </div>
+
+  <div id="filter-panel" class="panel">
+    <div style="display:flex; flex-wrap:wrap; gap:15px; align-items:end;">
+      <div style="position: relative;">
+        <label>Search Station</label><br>
+        <input type="text" id="station-search" placeholder="Type station name..." style="padding:4px; width: 200px;">
+        <div id="station-suggestions" style="border:1px solid #ccc; max-height:150px; overflow-y:auto; display:none; background:#fff;"></div>
+      </div>
+      <div>
+        <label>Common Name</label><br>
+        <select id="common-name-dropdown" style="padding:4px; width:200px;">
+          <option value="">-- All --</option>
+          <option>Bluegill</option>
+          <option>Channel Catfish</option>
+          <option>Clark's Grebe</option>
+          <option>Common Carp</option>
+          <option>Freshwater Clam</option>
+          <option>Largemouth Bass</option>
+          <option>Mississippi silverside</option>
+          <option>Rainbow Trout</option>
+          <option>Redear Sunfish</option>
+          <option>Silverside</option>
+          <option>Smallmouth Bass</option>
+          <option>Striped Bass</option>
+          <option>Threadfin Shad</option>
+          <option>Western Grebe</option>
+        </select>
+      </div>
+      <div>
+        <label>Composite ID</label><br>
+        <input type="text" id="composite-id-search" placeholder="Search by Composite ID" style="padding:4px; width:200px;">
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div id="summary-panel" class="panel">
+  <strong>Analyte Summary:</strong>
+  <table id="summary-table" style="width:100%; font-size:12px; margin-top:5px;">
+    <thead>
+      <tr><th>Analyte</th><th>Mean</th><th>Min</th><th>Max</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<div id="download-container">
+  <button id="download-btn" disabled>Download CSV for selected stations</button>
+</div>
+
+<div id="station-data">Click a station to see its data here...</div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
+<script>
+const map = L.map('map').setView([37, -120], 6);
+const markers = L.markerClusterGroup();
+const stationDataDiv = document.getElementById('station-data');
+const selectedDiv = document.getElementById('selected-stations');
+const downloadBtn = document.getElementById('download-btn');
+const clearBtn = document.getElementById('clear-selection');
+
+let selectedStations = [];
+let markerMap = {};
+let allStations = [];
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+const drawnItems = new L.FeatureGroup();
+map.addLayer(drawnItems);
+
+const drawControl = new L.Control.Draw({
+  draw: { polygon: true, rectangle: false, polyline: false, circle: false, marker: false, circlemarker: false },
+  edit: { featureGroup: drawnItems, remove: true }
+});
+map.addControl(drawControl);
+
+// --- PANEL UPDATES ---
+function updateSelectedPanel() {
+  selectedDiv.textContent = selectedStations.length
+    ? selectedStations.join('\n')
+    : 'Click markers or draw a polygon to select stations...';
+  downloadBtn.disabled = selectedStations.length === 0;
+}
+
+// --- UPDATE STATION TABLE (with filters) ---
+function updateStationTable() {
+  if (!selectedStations.length) {
+    stationDataDiv.innerHTML = 'Select stations to see data...';
+    document.querySelector("#summary-table tbody").innerHTML = '';
+    return;
+  }
+
+  const namesQuery = selectedStations.map(n => encodeURIComponent(n)).join(',');
+  const common = document.getElementById("common-name-dropdown").value;
+  const composite = document.getElementById("composite-id-search").value;
+
+  let url = `/station-data?names=${namesQuery}&common_name=${encodeURIComponent(common)}&composite_id=${encodeURIComponent(composite)}`;
+
+  fetch(url)
+    .then(res => res.json())
+    .then(data => {
+      // --- SUMMARY ---
+      const summaryPanel = document.getElementById("summary-table").querySelector("tbody");
+      summaryPanel.innerHTML = "";
+      if (data.summary && data.summary.length) {
+        data.summary.forEach(r => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td>${r.Analyte_Group}</td>
+                          <td>${r.mean_result}</td>
+                          <td>${r.min_result}</td>
+                          <td>${r.max_result}</td>`;
+          summaryPanel.appendChild(tr);
+        });
+      }
+
+      // --- DETAILED TABLE ---
+      if (!data.records.length) {
+        stationDataDiv.innerHTML = 'No data for selected filters.';
+        return;
+      }
+      const columns = Object.keys(data.records[0]);
+      let html = '<table><thead><tr>';
+      columns.forEach(c => html += `<th>${c}</th>`);
+      html += '</tr></thead><tbody>';
+      data.records.forEach(row => {
+        html += '<tr>';
+        columns.forEach(c => html += `<td>${row[c]}</td>`);
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      stationDataDiv.innerHTML = html;
+    });
+}
+
+// --- CLEAR SELECTION ---
+clearBtn.addEventListener('click', () => {
+  selectedStations = [];
+  drawnItems.clearLayers();
+  updateSelectedPanel();
+  updateStationTable();
+});
+
+// --- DOWNLOAD CSV ---
+downloadBtn.addEventListener('click', () => {
+  const namesQuery = selectedStations.map(n => encodeURIComponent(n)).join(',');
+  const common = document.getElementById("common-name-dropdown").value;
+  const composite = document.getElementById("composite-id-search").value;
+  let url = `/download-station-data?names=${namesQuery}&common_name=${encodeURIComponent(common)}&composite_id=${encodeURIComponent(composite)}`;
+  window.open(url, '_blank');
+});
+
+// --- FETCH ALL STATIONS FOR MAP ---
+function loadAllStations() {
+  fetch(`/stations`)
+    .then(res => res.json())
+    .then(data => {
+      allStations = data.map(s => s.name);
+      markers.clearLayers();
+      markerMap = {};
+      data.forEach(s => {
+        if (s.lat && s.lon) {
+          const marker = L.marker([parseFloat(s.lat), parseFloat(s.lon)]);
+          marker.bindPopup(`<strong>${s.name}</strong>`);
+          marker.on('click', () => {
+            const idx = selectedStations.indexOf(s.name);
+            if (idx === -1) selectedStations.push(s.name);
+            else selectedStations.splice(idx, 1);
+            updateSelectedPanel();
+            updateStationTable();
+          });
+          markers.addLayer(marker);
+          markerMap[s.name] = marker;
+        }
+      });
+      map.addLayer(markers);
+    });
+}
+
+// --- INIT ---
+loadAllStations();
+
+// --- POLYGON SELECTION ---
+map.on(L.Draw.Event.CREATED, function(e) {
+  const layer = e.layer;
+  drawnItems.addLayer(layer);
+  const polygonGeoJSON = layer.toGeoJSON();
+  Object.entries(markerMap).forEach(([name, marker]) => {
+    const pt = turf.point([marker.getLatLng().lng, marker.getLatLng().lat]);
+    if (turf.booleanPointInPolygon(pt, polygonGeoJSON)) {
+      if (!selectedStations.includes(name)) selectedStations.push(name);
+    }
+  });
+  updateSelectedPanel();
+  updateStationTable();
+});
+
+// --- AUTOCOMPLETE ---
+const stationInput = document.getElementById("station-search");
+const suggestionsDiv = document.getElementById("station-suggestions");
+
+stationInput.addEventListener("input", () => {
+  const query = stationInput.value.trim().toLowerCase();
+  suggestionsDiv.innerHTML = "";
+  if (!query) { suggestionsDiv.style.display = "none"; return; }
+
+  const matches = allStations.filter(name => name.toLowerCase().includes(query)).slice(0, 10);
+  if (!matches.length) { suggestionsDiv.style.display = "none"; return; }
+
+  matches.forEach(name => {
+    const div = document.createElement("div");
+    div.textContent = name;
+    div.style.padding = "4px 8px";
+    div.style.cursor = "pointer";
+    div.addEventListener("click", () => {
+      if (!selectedStations.includes(name)) selectedStations.push(name);
+      updateSelectedPanel();
+      updateStationTable();
+      stationInput.value = "";
+      suggestionsDiv.style.display = "none";
+    });
+    suggestionsDiv.appendChild(div);
+  });
+  suggestionsDiv.style.display = "block";
+});
+
+document.addEventListener("click", (e) => {
+  if (!stationInput.contains(e.target) && !suggestionsDiv.contains(e.target)) {
+    suggestionsDiv.style.display = "none";
+  }
+});
+
+// --- FILTER DROPDOWN / COMPOSITE ID ---
+// Only filter table/summary, map markers stay intact
+document.getElementById("common-name-dropdown").addEventListener("change", updateStationTable);
+document.getElementById("composite-id-search").addEventListener("input", updateStationTable);
+</script>
+</body>
+</html>
